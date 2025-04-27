@@ -1,0 +1,997 @@
+openapi: 3.1.1
+info:
+  title: Cybotrade Datasource 
+  description: |
+    # Introduction 
+
+    Cybotrade Datsource is a financial data broker for the crypto market. We offer both REST and Websocket API, 
+    this document provides an overview to the usage of both APIs.
+
+    ### Server URLs
+    * **REST API** - https://api.datasource.cybotrade.rs
+    * **Websocket API** - [wss://stream.datasource.cybotrade.rs](wss://stream.datasource.cybotrade.rs)
+
+    ### Data providers
+    * [Bybit](https://www.bybit.com) 
+    * [Binance](https://binance.com)
+    * [Coinbase](https://www.coinbase.com)
+    * [Coinglass](https://coinglass.com)
+    * [CryptoQuant](http://cryptoquant.com)
+    * [GlassNode](https://glassnode.com)
+    * [AmberData](https://www.amberdata.io) (Coming Soon)
+    * [Santiment](https://santiment.net) (Coming Soon)
+
+    # Authentication
+
+    Once registered on [Datasource Web](https://datasource.cybotrade.rs), your API Key will be shown and that API Key 
+    has to be attached as follows to every request made to the server.
+
+    ```http
+    X-API-KEY: <your_api_key>
+    ```
+
+    Every request to the server requires a `X-API-KEY` header otherwise it will be rejected with a `401 Unauthorized`. 
+    If your subscription plan doesn't include **CryptoQuant** but you're making a request to `cryptoquant` related endpoints, 
+    your request will also get rejected with the message `401 Unauthorized`.
+
+    # Rate limits
+    
+    ### IP Rate Limit
+    
+    All traffic to the API server as long as your using the same IP address will share this limit where there should be **no more 
+    than 600 requests allowed in any 5-second window**.
+
+    > [!warning]
+    > Users who repeatedly violate the limit may get temporarily banned and receive `403 Access Denied`.
+
+    ### API Key Rate Limit
+    
+    All traffic to the API server using the same API Key will share the same rate limit tokens. By default, every API Key has 
+    **300** available tokens to spend in any **60-second window**.
+
+    Every requests to the server will include following headers to help users keep track of their rate limits:
+
+    ```http
+    X-Api-Limit: 300
+    X-Api-Limit-Remaining: 295
+    X-Api-Limit-Reset-Timestamp: 1741701779400
+    ```
+
+    - `X-Api-Limit`: the maximum tokens for the API key in any 60-second window.
+    - `X-Api-Limit-Remaining`: remaining tokens that can be spent.
+    - `X-Api-Limit-Reset-Timestamp`: UNIX timestamp in milliseconds of the end of the current window in which the available tokens will refresh.
+
+    The recommended way to handle rate limit is to keep track of the returned HTTP status and `X-Api-Limit-Reset-Timestamp` header. For example,
+
+    1. Query any endpoint.
+    2. Got `429 Too Many Requests`.
+    3. Sleep the program until `X-Api-Limit-Reset-Timestamp`.
+    4. Go to step 1.
+
+    > [!tip]
+    > Every endpoint listed in the documentation show their corresponding `token cost`.
+
+    # Migration from v1
+    Datasource v1 wasn't a public API hence there isn't any written documentation, however v2 is now a complete public API where
+    every user can use directly through the provided API Key.
+    
+    > [!warning]
+    > Note that the server upgrade will take place on **12/3/2025 (2pm - 4pm)**.
+    > During the upgrade, servers will be down and unaccessible, all currently running Cybotrade strategies will stop and will need a manual restart by the user once the upgrade completes.
+
+    ### Cybotrade library 
+    
+    It is important that you use `cybotrade>=1.5.0`, any versions older than this will not be able to use any datasource related 
+    features anymore.
+
+    ```sh
+    # run this to install latest version of cybotrade
+    pip install cybotrade>=1.5.0
+    ```
+
+    or if you are using `requirements.txt`, make sure it is included in it.
+
+    ```txt
+    cybotrade>=1.5.0
+    ```
+
+    ### Cybotrade cloud users
+    
+    If you have strategies now running on Cybotrade Cloud, do make sure you redeploy them by using `cybotrade>=1.5.0`, you can do this by 
+    stopping the running instances on the [console](https://console.cloud.cybotrade.rs) and create a new instance with the updated `requirements.txt`.
+
+    ### Topic naming
+
+    As for [Cybotrade](https://docs.cybotrade.rs) users, the only changes is the naming of topics. Previously, topics are named as follows:
+      - `glassnode|1m|market/deltacap_usd?a=BTC&i=10m`
+      - `cryptoquant|1m|btc/market-data/coinbase-premium-index?window=hour`
+
+    In v2, we removed `1m` and the corresponding topics will now be:
+      - `glassnode|market/deltacap_usd?a=BTC&i=10m`
+      - `cryptoquant|btc/market-data/coinbase-premium-index?window=hour`
+
+    Additionally, candle topics are now slightly different, regardless of exchanges it will now be:
+      - `bybit-linear|candle?symbol=BTCUSDT&interval=1h`
+      - `binance-linear|candle?symbol=BTCUSDT&interval=1h`
+
+    The query params `symbol` and `interval` are always required regardless of exchange. Refer to the [exchanges](#tag/exchange) section for more details.
+
+    #### Code sample
+    ```python
+    config = RuntimeConfig(
+        # V1 (Deprecated)
+        # datasource_topics=["coinglass|1m|futures/openInterest/ohlc-history?exchange=Binance&symbol=BTCUSDT&interval=1m"],
+        # candle_topics=["candles-1m-BTC/USDT-bybit"],
+
+        # V2
+        datasource_topics=["coinglass|futures/openInterest/ohlc-history?exchange=Binance&symbol=BTCUSDT&interval=1m"],
+        candle_topics=["bybit-linear|candle?symbol=BTCUSDT&interval=1m"],
+    )
+    ```
+
+    ### `split_data_map` and `end_time`
+
+    For users for were using `self.split_data_map` in previous cybotrade versions, we have deprecated this and as you have noticed,
+    our data don't return an `end_time` field now. 
+
+    If you wish to still use them you can use the python functions given below to achieve it:
+
+    ```py
+    SECOND = 1000
+    MINUTE = 60 * SECOND
+    HOUR = 60 * MINUTE
+    DAY = 24 * HOUR
+
+    def derive_interval_ms(topic):
+        if "cryptoquant" in topic:
+            if "min" in topic:
+                return MINUTE
+            elif "hour" in topic:
+                return HOUR
+            elif "day" in topic:
+                return DAY
+            else:
+                return 0
+        elif "glassnode" in topic:
+            if "10m" in topic:
+                return 10 * MINUTE
+            elif "1h" in topic:
+                return HOUR
+            elif "24h" in topic:
+                return DAY
+            elif "1w" in topic:
+                return 7 * DAY
+            elif "1month" in topic:
+                return 30 * DAY
+            else:
+                return 0
+        else:
+            if "1m" in topic:
+                return MINUTE
+            elif "3m" in topic:
+                return 3 * MINUTE
+            elif "5m" in topic:
+                return 5 * MINUTE
+            elif "10m" in topic:
+                return 10 * MINUTE
+            elif "15m" in topic:
+                return 15 * MINUTE
+            elif "30m" in topic:
+                return 30 * MINUTE
+            elif "1h" in topic:
+                return HOUR
+            elif "2h" in topic:
+                return 2 * HOUR
+            elif "4h" in topic:
+                return 4 * HOUR
+            elif "6h" in topic:
+                return 6 * HOUR
+            elif "12h" in topic:
+                return 12 * HOUR
+            elif "1d" in topic:
+                return DAY
+            elif "3d" in topic:
+                return 3 * DAY
+            elif "1w" in topic:
+                return 7 * DAY
+            elif "1M" in topic:
+                return 30 * DAY
+            else:
+                return 0
+
+
+    def convert_to_split(data_map):
+        split = {}
+
+        for topic in data_map.keys():
+            split[topic] = {}
+
+            if len(data_map[topic]) == 0:
+                continue
+
+            for key in data_map[topic][0].keys():
+                split[topic][key] = []
+
+                for value in data_map[topic]:
+                    split[topic][key].append(value[key])
+
+            interval_ms = derive_interval_ms(topic)
+            split[topic]["end_time"] = []
+            for value in data_map[topic]:
+                split[topic]["end_time"].append(value["start_time"] + interval_ms - SECOND)
+
+        return split
+    ```
+
+    copy the functions above into your python script and use it as follows:
+
+    ```py
+    async def on_datasource_interval(self, strategy, topic, data_list):
+        self.split_data_map = convert_to_split(self.data_map)
+    ```
+
+    Now in subsequent sections you can use `self.split_data_map` as previously did.
+  version: 2.0.0
+  contact:
+    name: Marcus Lee
+    url: https://datasource.cybotrade.rs
+    email: marcuslee@balaenaquant.com
+  # license:
+  #   name: MIT
+  #   url: https://opensource.org/license/MIT
+servers:
+  - url: https://api.datasource.cybotrade.rs
+    description: REST API
+  - url: wss://stream.datasource.cybotrade.rs
+    description: Websocket API
+security:
+  - apiKeyHeader: []
+tags:
+  - name: Provider
+    description:
+      On-chain, market and all kinds of different data provided by third-party providers.
+  - name: Exchange
+    description:
+      Market data provided by crypto exchanges.
+  - name: Websocket API
+    description: |
+      Websocket API is used to serve live data from upstream exchanges / providers ensuring that the data sent has already been closed.
+
+      URL: [wss://stream.datasource.cybotrade.rs](wss://stream.datasource.cybotrade.rs)
+
+paths:
+  '/cryptoquant/{endpoint}':
+    get:
+      tags:
+        - Provider
+      summary: CryptoQuant
+      description: |
+        Access onchain, market data from CryptoQuant. You should refer to their [docs](https://cryptoquant.com/docs) to find out which endpoint you want to query and its corresponding parameters. 
+
+        **Rate limit tokens**: `5`
+
+        #### Examples
+        - `cryptoquant|btc/exchange-flows/inflow?exchange=okx&window=hour`
+      operationId: cryptoquant
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/start_time'
+        - $ref: '#/components/parameters/end_time'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/flatten'
+      responses:
+        '200':
+          $ref: '#/components/responses/OK'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  '/glassnode/{endpoint}':
+    get:
+      tags:
+        - Provider
+      summary: Glassnode
+      description: |
+        Access onchain, market data from Glassnode. You should refer to their [docs](https://docs.glassnode.com) to find out which endpoint you want to query and its corresponding parameters. 
+
+        **Rate limit tokens**: `5`
+
+        #### Examples
+        - `glassnode|blockchain/utxo_created_value_median?a=BTC&c=USD&i=1h`
+      operationId: glassnode
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/start_time'
+        - $ref: '#/components/parameters/end_time'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/flatten'
+      responses:
+        '200':
+          $ref: '#/components/responses/OK'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  '/coinglass/{endpoint}':
+    get:
+      tags:
+        - Provider
+      summary: Coinglass
+      description: |
+        Access onchain, market data from Coinglass. You should refer to their [docs](https://docs.coinglass.com/reference/getting-started-with-your-api) to find out which endpoint you want to query and its corresponding parameters. 
+
+        **Rate limit tokens**: `5`
+
+        #### Examples
+        - `coinglass|futures/openInterest/ohlc-history?exchange=Binance&symbol=BTCUSDT&interval=1m`
+      operationId: coinglass
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/start_time'
+        - $ref: '#/components/parameters/end_time'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/OK'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  '/bybit-spot/candle':
+    get:
+      tags:
+        - Exchange
+      summary: Bybit (USDT / USDC Spot)
+      description: |
+        Get market data (klines / candle) from the [Bybit](https://bybit.com) exchange. 
+
+        **Rate limit tokens**: `1`
+      operationId: bybit_spot_candle
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/symbol'
+        - $ref: '#/components/parameters/interval'
+        - $ref: '#/components/parameters/start_time'
+        - $ref: '#/components/parameters/end_time'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/OK'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Candle'
+                  page:
+                    type: object
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  '/bybit-linear/candle':
+    get:
+      tags:
+        - Exchange
+      summary: Bybit (USDT / USDC Perpetual)
+      description: |
+        Get market data (klines / candle) from the [Bybit](https://bybit.com) exchange. 
+
+        **Rate limit tokens**: `1`
+      operationId: bybit_linear_candle
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/symbol'
+        - $ref: '#/components/parameters/interval'
+        - $ref: '#/components/parameters/start_time'
+        - $ref: '#/components/parameters/end_time'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/OK'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Candle'
+                  page:
+                    type: object
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  '/bybit-inverse/candle':
+    get:
+      tags:
+        - Exchange
+      summary: Bybit (Inverse Perpetual)
+      description: |
+        Get market data (klines / candle) from the [Bybit](https://bybit.com) exchange. 
+
+        **Rate limit tokens**: `1`
+      operationId: bybit_inverse_candle
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/symbol'
+          schema:
+            type: string
+            example: BTCUSD
+        - $ref: '#/components/parameters/interval'
+        - $ref: '#/components/parameters/start_time'
+        - $ref: '#/components/parameters/end_time'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/OK'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Candle'
+                  page:
+                    type: object
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  '/binance-spot/candle':
+    get:
+      tags:
+        - Exchange
+      summary: Binance (Spot)
+      description: |
+        Get market data (klines / candle) from the [Binance](https://binance.com) exchange. 
+
+        **Rate limit tokens**: `1`
+      operationId: binance_spot_candle
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/symbol'
+        - $ref: '#/components/parameters/interval'
+        - $ref: '#/components/parameters/start_time'
+        - $ref: '#/components/parameters/end_time'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/OK'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Candle'
+                  page:
+                    type: object
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  '/binance-linear/candle':
+    get:
+      tags:
+        - Exchange
+      summary: Binance (USDM Futures)
+      description: |
+        Get market data (klines / candle) from the [Binance](https://binance.com) exchange. 
+
+        **Rate limit tokens**: `1`
+      operationId: binance_linear_candle
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/symbol'
+        - $ref: '#/components/parameters/interval'
+        - $ref: '#/components/parameters/start_time'
+        - $ref: '#/components/parameters/end_time'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/OK'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Candle'
+                  page:
+                    type: object
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  '/coinbase/candle':
+    get:
+      tags:
+        - Exchange
+      summary: Coinbase
+      description: |
+        Get market data (klines / candle) from the [Coinbase](https://www.coinbase.com) exchange. 
+
+        **Rate limit tokens**: `1`
+      operationId: coinbase_candle
+      security:
+        - apiKeyHeader: []
+      parameters:
+        - $ref: '#/components/parameters/symbol'
+          schema:
+            type: string
+            example: BTC-USD
+        - $ref: '#/components/parameters/interval'
+        - $ref: '#/components/parameters/start_time'
+        - $ref: '#/components/parameters/end_time'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          $ref: '#/components/responses/OK'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Candle'
+                  page:
+                    type: object
+                    $ref: '#/components/schemas/Pagination'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  '/':
+    get:
+      tags:
+        - Websocket API
+      summary: Live data stream
+      description: |
+        ## Heartbeat
+        The server expects a `PING` frame every 3 minutes, if no `PING` frames were received within 3 minutes, the connection will be closed immediately.
+        Hence, it is recommended to send a `PING` frame every 30 seconds on the client-side to avoid disconnection. 
+
+        Following example in Python shows how to handles the heartbeat:
+
+        ```python
+        import asyncio
+        import websockets
+
+        async def send_ping(websocket):
+            while True:
+                await asyncio.sleep(30)  # Wait for 30 seconds
+                await websocket.ping()  # Send PING frame to the server
+                print("Sent PING")
+     
+        async with websockets.connect(uri) as websocket:
+            print(f"connected to {uri}")
+
+            # Start the background task to send PING
+            asyncio.create_task(send_ping(websocket))
+        ```
+
+        > [!warning]
+        > disconnection can occur from time to time, thus for a long-running session it is expected that the clients implement
+        > their own reconnection logic in case of disconnection. **Cybotrade** library handles this for you.
+
+        ## Subscription
+        Once the websocket connection is established, the user have 30 seconds to send a subscription message before the connection will be closed. 
+        Following shows an example of a subscription message, note that there is at the moment no limits to how many topics a single WS connection can 
+        subscribe to but it is best to keep it to 20 topics or lower.
+
+        ### Subscription message
+        ```json
+        { 
+          "api_key": "<your_api_key>",
+          "topics": [
+            "cryptoquant|btc/exchange-flows/inflow?exchange=okx&window=hour",
+            "glassnode|blockchain/utxo_created_value_median?a=BTC&c=USD&i=1h"
+          ]
+        }
+        ```
+
+        ### Subscription response
+
+        #### Successfully subscribed 
+        ```json
+        { 
+          "conn_id": "fc2fb3be-c76c-4100-bcc7-990dbdb7a02e",
+          "success": true,
+          "message": "successfully connected with 2 topics"
+        }
+        ```
+
+        #### Failed subscription
+        ```json
+        { 
+          "conn_id": "fc2fb3be-c76c-4100-bcc7-990dbdb7a02e",
+          "success": false,
+          "message": "API Key is invalid or lack the required scopes"
+        }
+        ```
+
+        ## Data stream
+        Once connected, every time when a data closes then the server sends the captured data to the connected clients. 
+        Note that for some providers such as CryptoQuant / Glassnode, it is common that the data delivery will be delayed 
+        as it takes the provider some time to confirm the datapoint has been closed. This is especially common in on-chain 
+        data such as **exchange-flows**, etc.
+
+        #### Data update example
+        ```json
+        {
+          "topic": "bybit-linear|candle?interval=1m&symbol=BTCUSDT",
+          "data": [
+            { 
+              "start_time": 1741025460000, 
+              "close": 89645.8, 
+              "high": 89721.5,
+              "low": 89396.6,
+              "open": 89560.1,
+              "volume": 399.492 
+            }
+          ],
+          "local_timestamp_ms": 1741025523072,
+          "type": "delta"
+        }
+        ```
+
+        > [!warning]
+        > Note that for **glassnode** any data with `interval=1h` are shifted backwards by one due to its inconsistencies
+        > in data delays.
+
+      operationId: websocket
+      x-codeSamples:
+        - label: Websockets
+          lang: Python
+          source: |-
+            import json
+            import asyncio
+            import websockets
+            from datetime import datetime
+            
+            async def send_ping(websocket):
+                while True:
+                    await asyncio.sleep(30)  # Wait for 30 seconds
+                    await websocket.ping()  # Send PING frame to the server
+                    print("Sent PING")
+            
+            async def receive_messages(uri):
+                async with websockets.connect(uri) as websocket:
+                    print(f"connected to {uri}")
+            
+                    # Start the background task to send PING
+                    asyncio.create_task(send_ping(websocket))
+            
+                    await websocket.send(json.dumps({
+                        "topics": [
+                            "cryptoquant|btc/market-data/open-interest?exchange=bybit&window=min",
+                            "bybit-linear|candle?symbol=BTCUSDT&interval=1m",
+                            "cryptoquant|btc/market-data/coinbase-premium-index?window=hour",
+                            "cryptoquant|btc/exchange-flows/outflow?exchange=coinbase_advanced&window=hour",
+                            "glassnode|market/deltacap_usd?a=BTC&i=10m"
+                        ], 
+                        "api_key": ""
+                    }))
+                    print("sent subscription")
+            
+                    # Receive and print messages from the server
+                    while True:
+                        message = await websocket.recv()
+                        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Received message: {message}")
+            
+            async def main():
+                uri = "wss://stream.flow.balaenaquant.com"  # WebSocket server URL
+                await receive_messages(uri)
+            
+            # Run the main function
+            if __name__ == "__main__":
+                asyncio.run(main())
+            
+components:
+  securitySchemes:
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key request header
+  parameters:
+    symbol:
+      name: symbol
+      description: Currency pair / instrument on the exchange.
+      in: query
+      required: true
+      schema:
+        type: string
+        example: BTCUSDT
+    interval:
+      name: interval
+      description: The interval of the data
+      in: query
+      required: true
+      schema:
+        type: string
+        enum: [1m, 3m, 5m, 10m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 3d, 1w, 1M]
+        example: 1h
+    flatten:
+      name: flatten
+      description: Whether to flatten nested objects in the data
+      in: query
+      required: false
+      schema:
+        type: boolean
+        example: true
+        default: false
+    start_time:
+      name: start_time
+      description: The beginning time of the data (UNIX timestamp in milliseconds)
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int64
+    end_time:
+      name: end_time
+      description: The end time of the data (UNIX timestamp in milliseconds)
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int64
+    limit:
+      name: limit
+      description: |
+        The number of items to return (maximum: 100000)
+      in: query
+      required: false
+      schema:
+        type: integer
+        format: int64
+  responses:
+    OK:
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            $ref: '#/components/schemas/SuccessfulResponse'
+    BadRequest:
+      description: Bad Request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BadRequestError'
+    Unauthorized:
+      description: API Key is invalid
+    NotFound:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NotFoundError'
+    TooManyRequest:
+      description: Too many request
+      content:
+        text/plain:
+          schema: 
+            type: string
+            example: You have exceeded API Key Rate Limit, please wait for awhile before trying again
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalServerError'
+  schemas:
+    SuccessfulResponse:
+      x-scalar-ignore: true
+      description: The response returned when a query was executed successfully and its corresponding data is returned.
+      type: object
+      required:
+        - data
+        - page
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Data'
+        page:
+          type: object
+          $ref: '#/components/schemas/Pagination'
+    BadRequestError:
+      x-scalar-ignore: true
+      description: The response returned when the given parameters is invalid.
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          examples:
+            - start_time provided is not a valid UNIX timestamp.
+    NotFoundError:
+      x-scalar-ignore: true
+      description: The response returned when a specified provider / exchange / endpoint cannot be found.
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          examples:
+            - provider '{provider}' is not supported.
+    InternalServerError:
+      x-scalar-ignore: true
+      description: The response returned when the server fails to query upstream providers.
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          examples:
+            - something went wrong, try again later.
+    ErrorResponse:
+      x-scalar-ignore: true
+      description: The response returned when an error occurs and the query was not successful.
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          examples:
+            - start_time provided is not a valid UNIX timestamp.
+    Candle:
+      description: A single datapoint. Different exchange / provider has different format for each datapoint but it is guaranteed that every datapoint will have its correspoding `start_time` attached.
+      type: object
+      required:
+        - start_time
+      properties:
+        start_time:
+          type: integer
+          format: int64
+          example: 1740990814113
+        open:
+          type: number
+          format: double
+          example: 95421.40
+        high:
+          type: number
+          format: double
+          example: 95521.40
+        low:
+          type: number
+          format: double
+          example: 95321.40
+        close:
+          type: number
+          format: double
+          example: 95512.40
+        volume:
+          type: number
+          format: double
+          example: 123.23
+    Data:
+      description: A single datapoint. Different exchange / provider has different format for each datapoint but it is guaranteed that every datapoint will have its correspoding `start_time` attached.
+      type: object
+      required:
+        - start_time
+      properties:
+        start_time:
+          type: integer
+          format: int64
+          examples:
+            - 1740990814113
+    Pagination:
+      description: Information regarding pagination
+      type: object
+      required:
+        - start_time
+        - end_time
+        - limit
+        - mode
+      properties:
+        start_time:
+          type: integer
+          format: int64
+          examples:
+            - 1740990814113
+        end_time:
+          type: integer
+          format: int64
+          examples:
+            - 1740990827570
+        limit:
+          type: integer
+          format: int64
+          examples:
+            - 1000
+        mode:
+          type:
+            - string
+          examples:
+            - end_time_limit
+            - start_time_limit
+            - start_time_end_time
+
